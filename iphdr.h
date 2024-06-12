@@ -2,7 +2,7 @@
 #include "ip.h"
 
 struct IpHdr final {
-    uint8_t version_and_ihl;
+    u_int8_t ip_hl:4, ip_v:4;
     uint8_t dscp_and_ecn;
     uint16_t total_length;
     uint16_t identification;
@@ -15,7 +15,7 @@ struct IpHdr final {
 
     Ip sip() { return Ip(ntohl(sip_)); }
     Ip dip() { return Ip(ntohl(dip_)); }
-    uint16_t header_len() { return (version_and_ihl & 0x0F) * 4; }
+    uint16_t header_len() { return ip_hl * 4; }
 
     // Protocol(ip_protocol)
     enum: uint8_t {

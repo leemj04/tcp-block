@@ -2,9 +2,13 @@
 #include <pcap.h>
 #include <unistd.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <fstream>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <cstring>
+#include <arpa/inet.h>
+
 #include "ethhdr.h"
 #include "iphdr.h"
 #include "tcphdr.h"
@@ -55,8 +59,8 @@ void dump(char* packet) {
     printf("  |- Protocol        : %u\n", eth->type());
 
     printf("IP Header\n");
-    printf("  |- IP Version      : %u\n", ip->version_and_ihl >> 4);
-    printf("  |- IP Header Length: %u DWORDS or %u Bytes\n", ip->version_and_ihl & 0x0F, ip->header_len());
+    printf("  |- IP Version      : %u\n", ip->ip_v);
+    printf("  |- IP Header Length: %u DWORDS or %u Bytes\n", ip->header_len(), ip->header_len());
     printf("  |- Type Of Service  : %u\n", ip->dscp_and_ecn);
     printf("  |- IP Total Length   : %u Bytes(Size of Packet)\n", ntohs(ip->total_length));
     printf("  |- Identification    : %u\n", ntohs(ip->identification));
@@ -81,13 +85,20 @@ void dump(char* packet) {
     printf("  |- Window         : %u\n", ntohs(tcp->win_));
     printf("  |- Checksum       : %u\n", ntohs(tcp->sum_));
     printf("  |- Urgent Pointer : %u\n", ntohs(tcp->urp_));
-    printf("  |- Payload\n");
+    printf("  |- Payload        : %ld\n", strlen(payload));
     printf("    %s\n", payload);
 }
 
 void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr* tcp, const char* payload, int recv_len, bool is_forward) {
     char mac[18];
-    int base_packet_len = sizeof(EthHdr) + sizeof(IpHdr) + tcp->header_len() + strlen(payload);
+    int eth_len = sizeof(EthHdr);
+    int ip_len = ip->header_len();
+    int tcp_len = sizeof(TcpHdr);
+    int payload_len = strlen(payload);
+
+    printf("\n\npayload_len: %d\n", payload_len);
+    
+    int base_packet_len = eth_len + ip_len + tcp_len + payload_len;
 
     while (!get_s_mac(dev, mac)) {
         printf("Failed to get source MAC address\n");
@@ -98,35 +109,48 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     TcpHdr new_tcp;
 
     // Construct Ethernet header
-    memcpy(&new_eth, eth, sizeof(EthHdr));
-    if (!is_forward) {
-        new_eth.dmac_ = eth->smac_;
-    }
-    new_eth.smac_ = Mac(mac);
+    memcpy(&new_eth, eth, eth_len);
+    // if (!is_forward) {
+    //     new_eth.dmac_ = eth->smac_;
+    // }
+    // new_eth.smac_ = Mac(mac);
+    // if (!is_forward) {
+    //     new_eth.dmac_ = eth->dmac_;
+    //     new_eth.smac_ = eth->smac_;
+    // } else {
+    //     new_eth.dmac_ = eth->dmac_;
+    //     new_eth.smac_ = eth->smac_;
+    // }
 
     // Construct IP header
-    memcpy(&new_ip, ip, sizeof(IpHdr));
+    memcpy(&new_ip, ip, ip_len);
     if (!is_forward) {
         new_ip.sip_ = ip->dip_;
         new_ip.dip_ = ip->sip_;
         new_ip.ttl = 128;
     }
-    new_ip.total_length = htons(sizeof(IpHdr) + tcp->header_len() + strlen(payload));
+    new_ip.total_length = htons(ip_len + tcp_len + payload_len);
     new_ip.checksum = 0;
-    new_ip.checksum = checksum((uint16_t*)&new_ip, sizeof(IpHdr));
+    new_ip.checksum = checksum((uint16_t*)&new_ip, ip_len);
+
+    printf("new_ip.total_length: %d\n", ntohs(new_ip.total_length));
+    printf("%d %d %d\n", ip_len, tcp_len, payload_len);
 
     // Construct TCP header
-    memcpy(&new_tcp, tcp, tcp->header_len());
+    memcpy(&new_tcp, tcp, tcp_len);
     if (is_forward) {
         new_tcp.flags_ = TcpHdr::RST | TcpHdr::ACK;
         new_tcp.seq_ = htonl(ntohl(tcp->seq_) + recv_len);
     } else {
         new_tcp.sport_ = tcp->dport_;
         new_tcp.dport_ = tcp->sport_;
-        new_tcp.flags_ = TcpHdr::FIN | TcpHdr::ACK;
+        new_tcp.flags_ = TcpHdr::FIN | TcpHdr::ACK | TcpHdr::PSH;
         new_tcp.seq_ = tcp->ack_;
         new_tcp.ack_ = htonl(ntohl(tcp->seq_) + recv_len);
     };
+    new_tcp.hlen_ = (sizeof(TcpHdr) / 4) << 4;
+    new_tcp.win_ = 0;
+    new_tcp.urp_ = 0;
     new_tcp.sum_ = 0;
 
     pseudo_header psh;
@@ -134,22 +158,24 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     psh.dest_address = new_ip.dip_;
     psh.placeholder = 0;
     psh.protocol = IpHdr::TCP;
-    psh.tcp_length = htons(tcp->header_len() + strlen(payload));
+    psh.tcp_length = htons(tcp_len + payload_len);
 
-    char *buffer = (char *)malloc(sizeof(pseudo_header) + tcp->header_len() + strlen(payload));
+    char *buffer = (char *)malloc(sizeof(pseudo_header) + tcp_len + payload_len);
     memcpy(buffer, &psh, sizeof(pseudo_header));
-    memcpy(buffer + sizeof(pseudo_header), &new_tcp, tcp->header_len());
-    memcpy(buffer + sizeof(pseudo_header) + tcp->header_len(), payload, strlen(payload));
+    memcpy(buffer + sizeof(pseudo_header), &new_tcp, tcp_len);
+    memcpy(buffer + sizeof(pseudo_header) + tcp_len, payload, payload_len);
 
     new_tcp.sum_ = checksum((uint16_t*)buffer, sizeof(buffer));
 
     char *packet = (char *)malloc(base_packet_len);
-    memcpy(packet, &new_eth, sizeof(EthHdr));
-    memcpy(packet + sizeof(EthHdr), &new_ip, sizeof(IpHdr));
-    memcpy(packet + sizeof(EthHdr) + sizeof(IpHdr), &new_tcp, tcp->header_len());
-    memcpy(packet + sizeof(EthHdr) + sizeof(IpHdr) + tcp->header_len(), payload, strlen(payload));
+    memcpy(packet, &new_eth, eth_len);
+    memcpy(packet + eth_len, &new_ip, ip_len);
+    memcpy(packet + eth_len + ip_len, &new_tcp, tcp_len);
+    memcpy(packet + eth_len + ip_len + tcp_len, payload, payload_len);
 
     dump(packet);
+
+    printf("payload: %s\n", packet + eth_len + ip_len + tcp_len);
 
     if (is_forward) {
         int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
@@ -163,7 +189,7 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
         sin.sin_port = new_tcp.sport();
         sin.sin_addr.s_addr = new_ip.sip();
 
-        if (sendto(sockfd, (unsigned char*)(packet + sizeof(EthHdr)), ntohs(new_ip.total_length), 0, (struct sockaddr *)&sin, sizeof(sin)) < 0){
+        if (sendto(sockfd, (unsigned char*)(packet + eth_len), ntohs(new_ip.total_length), 0, (struct sockaddr *)&sin, sizeof(sin)) < 0){
             perror("sendto failed");
         }
         
@@ -207,10 +233,13 @@ int main(int argc, char* argv[]) {
         IpHdr* ip = (IpHdr*)(packet + sizeof(EthHdr));
         if (ip->protocol != IpHdr::TCP) continue;
 
-        TcpHdr* tcp = (TcpHdr*)(packet + sizeof(EthHdr) + ip->header_len());
-        int payload_len = ntohs(ip->total_length) - ip->header_len() - tcp->header_len();
-        const char* payload = (const char*)(packet + sizeof(EthHdr) + ip->header_len() + tcp->header_len());
-        const char *new_payload = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n";
+        TcpHdr* tcp = (TcpHdr*)(packet + sizeof(EthHdr) + sizeof(IpHdr));
+        int eth_len = sizeof(EthHdr);
+        int ip_len = ip->header_len();
+        int tcp_len = tcp->header_len();
+        int payload_len = ntohs(ip->total_length) - ip_len - tcp_len;
+        const char* payload = (const char*)(packet + eth_len + ip_len + tcp_len);
+        const char *new_payload = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n ";
 
         if (strncmp(payload, "GET", 3) != 0) continue;
         for (int i = 0; i < 50; i++) {
