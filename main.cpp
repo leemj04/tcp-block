@@ -13,6 +13,8 @@
 #include "iphdr.h"
 #include "tcphdr.h"
 
+char mac[18];
+
 void usage() {
     printf("syntax: tcp-block <interface> <pattern>\n");
     printf("sample: tcp-block wlan0 \"Host: test.gilgil.net\"\n");
@@ -76,12 +78,12 @@ void dump(char* packet) {
     printf("  |- Sequence Number    : %u\n", ntohl(tcp->seq_));
     printf("  |- Acknowledge Number : %u\n", ntohl(tcp->ack_));
     printf("  |- Header Length      : %u DWORDS or %u BYTES\n", tcp->hlen_ >> 4, tcp->header_len());
-    printf("  |- Urgent Flag          : %u\n", tcp->flags_ & TcpHdr::URG >> 5);
-    printf("  |- Acknowledgement Flag : %u\n", tcp->flags_ & TcpHdr::ACK >> 4);
-    printf("  |- Push Flag            : %u\n", tcp->flags_ & TcpHdr::PSH >> 3);
-    printf("  |- Reset Flag           : %u\n", tcp->flags_ & TcpHdr::RST >> 2);
-    printf("  |- Synchronise Flag     : %u\n", tcp->flags_ & TcpHdr::SYN >> 1);
-    printf("  |- Finish Flag          : %u\n", tcp->flags_ & TcpHdr::FIN >> 0);
+    printf("  |- Urgent Flag          : %u\n", (tcp->flags_ & TcpHdr::URG) >> 5);
+    printf("  |- Acknowledgement Flag : %u\n", (tcp->flags_ & TcpHdr::ACK) >> 4);
+    printf("  |- Push Flag            : %u\n", (tcp->flags_ & TcpHdr::PSH) >> 3);
+    printf("  |- Reset Flag           : %u\n", (tcp->flags_ & TcpHdr::RST) >> 2);
+    printf("  |- Synchronise Flag     : %u\n", (tcp->flags_ & TcpHdr::SYN) >> 1);
+    printf("  |- Finish Flag          : %u\n", (tcp->flags_ & TcpHdr::FIN) >> 0);
     printf("  |- Window         : %u\n", ntohs(tcp->win_));
     printf("  |- Checksum       : %u\n", ntohs(tcp->sum_));
     printf("  |- Urgent Pointer : %u\n", ntohs(tcp->urp_));
@@ -90,19 +92,11 @@ void dump(char* packet) {
 }
 
 void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr* tcp, const char* payload, int recv_len, bool is_forward) {
-    char mac[18];
     int eth_len = sizeof(EthHdr);
     int ip_len = ip->header_len();
-    int tcp_len = tcp->header_len();
+    int tcp_len = sizeof(TcpHdr);
     int payload_len = strlen(payload);
-
-    printf("\n\npayload_len: %d\n", payload_len);
-    
-    int base_packet_len = eth_len + ip_len + tcp_len + payload_len;
-
-    while (!get_s_mac(dev, mac)) {
-        printf("Failed to get source MAC address\n");
-    }
+    int packet_len = eth_len + ip_len + tcp_len + payload_len;
 
     EthHdr new_eth;
     IpHdr new_ip;
@@ -114,13 +108,6 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
         new_eth.dmac_ = eth->smac_;
     }
     new_eth.smac_ = Mac(mac);
-    // if (!is_forward) {
-    //     new_eth.dmac_ = eth->dmac_;
-    //     new_eth.smac_ = eth->smac_;
-    // } else {
-    //     new_eth.dmac_ = eth->dmac_;
-    //     new_eth.smac_ = eth->smac_;
-    // }
 
     // Construct IP header
     memcpy(&new_ip, ip, ip_len);
@@ -130,12 +117,11 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
         new_ip.ttl = 128;
     }
     new_ip.checksum = 0;
-
-    printf("new_ip.total_length: %d\n", ntohs(new_ip.total_length));
-    printf("%d %d %d\n", ip_len, tcp_len, payload_len);
+    new_ip.total_length = htons(ip_len + tcp_len + payload_len);
+    new_ip.checksum = checksum((uint16_t*)&new_ip, ip_len);
 
     // Construct TCP header
-    memcpy(&new_tcp, tcp, sizeof(TcpHdr));
+    memcpy(&new_tcp, tcp, tcp->header_len());
     if (is_forward) {
         new_tcp.flags_ = TcpHdr::RST | TcpHdr::ACK;
         new_tcp.seq_ = htonl(ntohl(tcp->seq_) + recv_len);
@@ -151,11 +137,6 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     new_tcp.urp_ = 0;
     new_tcp.sum_ = 0;
 
-    // update tcp length
-    tcp_len = new_tcp.header_len();
-    base_packet_len = eth_len + ip_len + tcp_len + payload_len;
-    new_ip.total_length = htons(ip_len + tcp_len + payload_len);
-
     pseudo_header psh;
     psh.source_address = new_ip.sip_;
     psh.dest_address = new_ip.dip_;
@@ -169,9 +150,8 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     memcpy(buffer + sizeof(pseudo_header) + tcp_len, payload, payload_len);
 
     new_tcp.sum_ = checksum((uint16_t*)buffer, sizeof(buffer));
-    new_ip.checksum = checksum((uint16_t*)&new_ip, ip_len);
 
-    char *packet = (char *)malloc(base_packet_len);
+    char *packet = (char *)malloc(packet_len);
     memcpy(packet, &new_eth, eth_len);
     memcpy(packet + eth_len, &new_ip, ip_len);
     memcpy(packet + eth_len + ip_len, &new_tcp, tcp_len);
@@ -188,19 +168,22 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
 
         struct sockaddr_in sin;
         sin.sin_family = AF_INET;
-        sin.sin_port = new_tcp.sport();
-        sin.sin_addr.s_addr = new_ip.sip();
+        sin.sin_port = new_tcp.sport_;
+        sin.sin_addr.s_addr = new_ip.sip_;
 
-        if (sendto(sockfd, (unsigned char*)(packet + eth_len), ntohs(new_ip.total_length), 0, (struct sockaddr *)&sin, sizeof(sin)) < 0){
+        if (sendto(sockfd, (unsigned char*)packet + eth_len, packet_len - eth_len, 0, (struct sockaddr *)&sin, sizeof(sin)) < 0){
             perror("sendto failed");
         }
         
         close(sockfd);
     } else {
-        if (pcap_sendpacket(handle, (const u_char*)packet, base_packet_len) != 0) {
+        if (pcap_sendpacket(handle, (const u_char*)packet, packet_len) != 0) {
             fprintf(stderr, "pcap_sendpacket return %d error=%s\n", -1, pcap_geterr(handle));
         }
     }
+
+    free(buffer);
+    free(packet);
 }
 
 int main(int argc, char* argv[]) {
@@ -211,6 +194,10 @@ int main(int argc, char* argv[]) {
 
     const char* dev = argv[1];
     const char* pattern = argv[2];
+
+    while (!get_s_mac(dev, mac)) {
+        printf("Failed to get source MAC address\n");
+    }
 
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
@@ -242,7 +229,7 @@ int main(int argc, char* argv[]) {
         int tcp_len = tcp->header_len();
         int payload_len = ntohs(ip->total_length) - ip_len - tcp_len;
         const char* payload = (const char*)(packet + eth_len + ip_len + tcp_len);
-        const char *new_payload = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n ";
+        const char *new_payload = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n";
 
         if (strncmp(payload, "GET", 3) != 0) continue;
         for (int i = 0; i < 50; i++) {
