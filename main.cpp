@@ -93,7 +93,7 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     char mac[18];
     int eth_len = sizeof(EthHdr);
     int ip_len = ip->header_len();
-    int tcp_len = sizeof(TcpHdr);
+    int tcp_len = tcp->header_len();
     int payload_len = strlen(payload);
 
     printf("\n\npayload_len: %d\n", payload_len);
@@ -110,10 +110,10 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
 
     // Construct Ethernet header
     memcpy(&new_eth, eth, eth_len);
-    // if (!is_forward) {
-    //     new_eth.dmac_ = eth->smac_;
-    // }
-    // new_eth.smac_ = Mac(mac);
+    if (!is_forward) {
+        new_eth.dmac_ = eth->smac_;
+    }
+    new_eth.smac_ = Mac(mac);
     // if (!is_forward) {
     //     new_eth.dmac_ = eth->dmac_;
     //     new_eth.smac_ = eth->smac_;
@@ -129,15 +129,13 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
         new_ip.dip_ = ip->sip_;
         new_ip.ttl = 128;
     }
-    new_ip.total_length = htons(ip_len + tcp_len + payload_len);
     new_ip.checksum = 0;
-    new_ip.checksum = checksum((uint16_t*)&new_ip, ip_len);
 
     printf("new_ip.total_length: %d\n", ntohs(new_ip.total_length));
     printf("%d %d %d\n", ip_len, tcp_len, payload_len);
 
     // Construct TCP header
-    memcpy(&new_tcp, tcp, tcp_len);
+    memcpy(&new_tcp, tcp, sizeof(TcpHdr));
     if (is_forward) {
         new_tcp.flags_ = TcpHdr::RST | TcpHdr::ACK;
         new_tcp.seq_ = htonl(ntohl(tcp->seq_) + recv_len);
@@ -153,6 +151,11 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     new_tcp.urp_ = 0;
     new_tcp.sum_ = 0;
 
+    // update tcp length
+    tcp_len = new_tcp.header_len();
+    base_packet_len = eth_len + ip_len + tcp_len + payload_len;
+    new_ip.total_length = htons(ip_len + tcp_len + payload_len);
+
     pseudo_header psh;
     psh.source_address = new_ip.sip_;
     psh.dest_address = new_ip.dip_;
@@ -166,6 +169,7 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     memcpy(buffer + sizeof(pseudo_header) + tcp_len, payload, payload_len);
 
     new_tcp.sum_ = checksum((uint16_t*)buffer, sizeof(buffer));
+    new_ip.checksum = checksum((uint16_t*)&new_ip, ip_len);
 
     char *packet = (char *)malloc(base_packet_len);
     memcpy(packet, &new_eth, eth_len);
@@ -175,9 +179,7 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
 
     dump(packet);
 
-    printf("payload: %s\n", packet + eth_len + ip_len + tcp_len);
-
-    if (is_forward) {
+    if (!is_forward) {
         int sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
         if (sockfd < 0) {
             fprintf(stderr, "socket return %d error=%s\n", sockfd, strerror(errno));
@@ -217,9 +219,10 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    struct pcap_pkthdr* header;
+    const u_char* packet;
+
     while (true) {
-        struct pcap_pkthdr* header;
-        const u_char* packet;
         int res = pcap_next_ex(handle, &header, &packet);
         if (res == 0) continue;
         if (res == -1 || res == -2) {
