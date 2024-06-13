@@ -29,24 +29,24 @@ bool get_s_mac(const char* dev, char* mac) {
     return true;
 }
 
-uint16_t checksum(uint16_t* ptr, int len) {
-    uint32_t sum = 0;
-    uint16_t odd = 0;
+uint16_t checksum(uint16_t* ptr, int len){
+	uint32_t sum = 0;
+	uint16_t odd = 0;
 
-    while (len > 1) {
-        sum += *ptr++;
-        len -= 2;
-    }
+	while (len > 1) {
+		sum += *ptr++;
+		len -= 2;
+	}
 
-    if (len == 1) {
-        *(uint8_t *)(&odd) = (*(uint8_t *)ptr);
-        sum += odd;
-    }
+	if (len == 1) {
+		*(uint8_t *)(&odd) = (*(uint8_t *)ptr);
+		sum += odd;
+	}
 
-    while (sum >> 16)
-        sum = (sum & 0xffff) + (sum >> 16);
+	if (sum >> 16)
+		sum = (sum & 0xffff) + (sum >> 16);
 
-    return ~sum;
+	return (uint16_t)~sum;
 }
 
 void dump(char* packet) {
@@ -121,14 +121,14 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     new_ip.checksum = checksum((uint16_t*)&new_ip, ip_len);
 
     // Construct TCP header
-    memcpy(&new_tcp, tcp, tcp->header_len());
+    memcpy(&new_tcp, tcp, tcp_len);
     if (is_forward) {
         new_tcp.flags_ = TcpHdr::RST | TcpHdr::ACK;
         new_tcp.seq_ = htonl(ntohl(tcp->seq_) + recv_len);
     } else {
         new_tcp.sport_ = tcp->dport_;
         new_tcp.dport_ = tcp->sport_;
-        new_tcp.flags_ = TcpHdr::FIN | TcpHdr::ACK | TcpHdr::PSH;
+        new_tcp.flags_ = TcpHdr::FIN | TcpHdr::ACK;
         new_tcp.seq_ = tcp->ack_;
         new_tcp.ack_ = htonl(ntohl(tcp->seq_) + recv_len);
     };
@@ -144,12 +144,13 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
     psh.protocol = IpHdr::TCP;
     psh.tcp_length = htons(tcp_len + payload_len);
 
-    char *buffer = (char *)malloc(sizeof(pseudo_header) + tcp_len + payload_len);
+    int buffer_len = sizeof(pseudo_header) + tcp_len + payload_len;
+    char *buffer = (char *)malloc(buffer_len);
     memcpy(buffer, &psh, sizeof(pseudo_header));
     memcpy(buffer + sizeof(pseudo_header), &new_tcp, tcp_len);
     memcpy(buffer + sizeof(pseudo_header) + tcp_len, payload, payload_len);
 
-    new_tcp.sum_ = checksum((uint16_t*)buffer, sizeof(buffer));
+    new_tcp.sum_ = checksum((uint16_t*)buffer, buffer_len);
 
     char *packet = (char *)malloc(packet_len);
     memcpy(packet, &new_eth, eth_len);
@@ -232,7 +233,7 @@ int main(int argc, char* argv[]) {
         int tcp_len = tcp->header_len();
         int payload_len = ntohs(ip->total_length) - ip_len - tcp_len;
         const char* payload = (const char*)(packet + eth_len + ip_len + tcp_len);
-        const char *new_payload = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n ";
+        const char* new_payload = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n ";
 
         if (strncmp(payload, "GET", 3) != 0) continue;
         for (int i = 0; i < 50; i++) {

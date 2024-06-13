@@ -1,4 +1,6 @@
-#pragma once
+# pragma once
+
+# pragma pack(push, 1)
 
 #include <arpa/inet.h>
 
@@ -29,9 +31,11 @@ struct TcpHdr final {
 };
 
 struct pseudo_header final {
-   unsigned int source_address;
-   unsigned int dest_address;
-   unsigned char placeholder;
-   unsigned char protocol;
-   unsigned short tcp_length;
+   u_int32_t source_address;
+   u_int32_t dest_address;
+   u_int8_t placeholder;
+   u_int8_t protocol;
+   u_int16_t tcp_length;
 };
+
+# pragma pack(pop)
