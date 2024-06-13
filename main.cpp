@@ -93,7 +93,7 @@ void dump(char* packet) {
 
 void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr* tcp, const char* payload, int recv_len, bool is_forward) {
     int eth_len = sizeof(EthHdr);
-    int ip_len = ip->header_len();
+    int ip_len = sizeof(IpHdr);
     int tcp_len = sizeof(TcpHdr);
     int payload_len = strlen(payload);
     int packet_len = eth_len + ip_len + tcp_len + payload_len;
@@ -171,6 +171,9 @@ void send_packet(pcap_t* handle, const char* dev, EthHdr* eth, IpHdr* ip, TcpHdr
         sin.sin_port = new_tcp.sport_;
         sin.sin_addr.s_addr = new_ip.sip_;
 
+        char optval = 0x01;
+        setsockopt(sockfd, IPPROTO_IP, IP_HDRINCL, &optval, sizeof(optval));
+
         if (sendto(sockfd, (unsigned char*)packet + eth_len, packet_len - eth_len, 0, (struct sockaddr *)&sin, sizeof(sin)) < 0){
             perror("sendto failed");
         }
@@ -229,7 +232,7 @@ int main(int argc, char* argv[]) {
         int tcp_len = tcp->header_len();
         int payload_len = ntohs(ip->total_length) - ip_len - tcp_len;
         const char* payload = (const char*)(packet + eth_len + ip_len + tcp_len);
-        const char *new_payload = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n";
+        const char *new_payload = "HTTP/1.0 302 Redirect\r\nLocation: http://warning.or.kr\r\n\r\n ";
 
         if (strncmp(payload, "GET", 3) != 0) continue;
         for (int i = 0; i < 50; i++) {
